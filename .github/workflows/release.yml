@@ -2,9 +2,8 @@ name: Release
 
 on:
   push:
-    # Trigger on tag pushes. Adjust pattern as needed (e.g. 'v*.*.*')
-    tags:
-      - '**'
+    branches:
+      - v2.0
   workflow_dispatch:
 
 jobs:
@@ -72,6 +71,9 @@ jobs:
     steps:
       - name: Check out code
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -137,7 +139,7 @@ jobs:
           GOOS=$GOOS GOARCH=$GOARCH GOARM=$GOARM GOMIPS=$GOMIPS \
           go build -ldflags "-s -w -checklinkname=0" -trimpath \
             -o "dist/server-${GOOS}-${GOARCH}${EXT}" \
-            ./server
+            ./server/cmd/turn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6
@@ -152,10 +154,35 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Generate release notes
+        id: release_notes
+        run: |
+          COMMIT_SUBJECT=$(git log -1 --format=%s)
+          COMMIT_BODY=$(git log -1 --format=%b)
+          {
+            echo "## ${COMMIT_SUBJECT}"
+            echo
+            printf '%s\n' "${COMMIT_BODY}"
+          } > RELEASE_NOTES.md
+
       - name: Download build artifacts
         uses: actions/download-artifact@v7
         with:
           path: dist
+
+      - name: Get release metadata
+        id: release_meta
+        run: |
+          BASE_VERSION="v2.0.8"
+          SHORT_SHA=$(git rev-parse --short=8 HEAD)
+          echo "base_version=$BASE_VERSION" >> "$GITHUB_OUTPUT"
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "release_tag=${BASE_VERSION}-${SHORT_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Create Release
         uses: softprops/action-gh-release@v2
@@ -163,9 +190,46 @@ jobs:
           # upload every file in dist/ including nested files
           files: |
             dist/**
-          # make the release name/tag the pushed tag
-          tag_name: ${{ github.ref_name }}
-          name: ${{ github.ref_name }}
+          # make the release name/tag unique per successful build
+          tag_name: ${{ steps.release_meta.outputs.release_tag }}
+          name: ${{ steps.release_meta.outputs.release_tag }}
+          target_commitish: ${{ github.sha }}
+          body_path: RELEASE_NOTES.md
           overwrite_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Remove old releases and tags
+        uses: actions/github-script@v7
+        env:
+          CURRENT_TAG: ${{ steps.release_meta.outputs.release_tag }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const { owner, repo } = context.repo;
+            const currentTag = process.env.CURRENT_TAG;
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              owner,
+              repo,
+              per_page: 100,
+            });
+            for (const release of releases) {
+              if (release.tag_name === currentTag) {
+                continue;
+              }
+              core.info(`Deleting stale release ${release.tag_name} (#${release.id})`);
+              await github.rest.repos.deleteRelease({
+                owner,
+                repo,
+                release_id: release.id,
+              });
+              try {
+                await github.rest.git.deleteRef({
+                  owner,
+                  repo,
+                  ref: `tags/${release.tag_name}`,
+                });
+              } catch (error) {
+                core.info(`Tag cleanup skipped for ${release.tag_name}: ${error.message}`);
+              }
+            }

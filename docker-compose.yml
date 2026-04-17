@@ -1,0 +1,8 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    container_name: vk-turn-server
+    network_mode: host
+    command: ["/main", "-listen", "0.0.0.0:56000", "-connect", "${LOCAL_WG_HOST:-127.0.0.1}:${LOCAL_WG_PORT}"]

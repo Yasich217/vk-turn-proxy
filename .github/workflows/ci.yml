@@ -141,7 +141,7 @@ jobs:
           GOOS=$GOOS GOARCH=$GOARCH \
           go build -ldflags "-s -w -checklinkname=0" -trimpath \
             -o "dist/server-${GOOS}-${GOARCH}${ext}" \
-            ./server
+            ./server/cmd/turn
 
       - name: Upload artifact
         uses: actions/upload-artifact@v6

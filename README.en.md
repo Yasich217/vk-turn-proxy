@@ -1,22 +1,27 @@
 # VK/WB TURN Proxy
 [Russian version](README.md)
 
-Tunnels WireGuard/Hysteria traffic through VK Calls or WB Stream TURN servers. Packets are encrypted with DTLS 1.2 and then sent in parallel streams via TCP or UDP to the TURN server using the STUN ChannelData protocol. From there, they are forwarded via UDP to your server, decrypted, and passed to WireGuard. TURN credentials are generated from the meeting link.
+Proxy server for WireGuard/Hysteria traffic over VK Calls and WB Stream TURN servers. Clients encrypt traffic with DTLS 1.2 and send it in parallel streams to TURN; the server aggregates those streams, keeps one UDP backend connection to WireGuard, and fans out responses to the active DTLS peers.
 
 ## Features
 
-- **VK Calls** — TURN credentials from VK API with automatic captcha solving (Not Robot)
-- **WB Stream** — TURN credentials from WB Stream API (LiveKit ICE)
-- **Caching** — 10 minute TTL with shared cache across 4 streams
-- **DTLS obfuscation** — DPI bypass via DTLS tunnel
-- **Multiple connections** — up to N parallel connections to TURN
+- **VK Calls** — TURN credentials from VK API with automatic captcha solving.
+- **WB Stream** — TURN credentials from WB Stream API.
+- **Protocols** — support for `proxy_v1`, `proxy_v2`, and `proxy_v2_meta`.
+- **Meta mode** — our extra client-state/webhook/script hooks are enabled only for `proxy_v2_meta`.
+- **Caching** — 10 minute TTL with shared cache across streams.
+- **DTLS obfuscation** — DPI bypass via DTLS tunnel.
+- **Multi-stream aggregation** — multiple streams from one client are grouped by Session ID.
+- **Compatibility** — legacy `v1` server flow and WB mode from the fork are preserved.
 
-**Update: Multi-user Proxy Server**
-The current implementation supports multiple simultaneous users through a single proxy server.
-- **Session Identification:** The client generates a unique 16-byte UUID at startup.
-- **Stream Aggregation:** The server groups all incoming DTLS connections from a single client by its UUID.
-- **Stable Backend:** For each session, exactly one UDP connection is created to the WireGuard server. This prevents the "endpoint thrashing" issue and increases stability.
-- **Load Balancing:** Outgoing traffic from the server to the client is distributed among all active DTLS streams of the user (Round-Robin).
+## Our additions
+
+This branch stays compatible with the core `vk-turn-proxy` protocol while extending it for our `wireguard-turn-android` client.
+
+- **External JSON client-state export**: the server can optionally write active client state to a JSON file for a dashboard or automation.
+- **Extended client metadata**: the server accepts and keeps additional Android client fields such as connection status, TURN mode, active stream count, and network metadata like public IP.
+- **Scoped hooks**: webhooks and local scripts are available only for `proxy_v2_meta`; `proxy_v1` and `proxy_v2` stay plain TURN modes.
+- **No mandatory API drift**: if state export is not enabled through environment variables, the server behaves like a regular `vk-turn-proxy` build and keeps the base proxy API intact.
 
 For educational purposes only!
 
@@ -44,12 +49,53 @@ You will need:
 ./server -listen 0.0.0.0:56000 -connect 127.0.0.1:<wg_port>
 ```
 
+Supported modes:
+- `proxy_v1` — old DTLS flow without `session_id` and `stream_id`.
+- `proxy_v2` — DTLS flow with `session_id + stream_id`.
+- `proxy_v2_meta` — our `v2` flow with extra metadata, webhooks, and scripts.
+
+The server runs in universal mode: a single instance on one port can serve mixed `proxy_v1`, `proxy_v2`, and `proxy_v2_meta` clients at the same time without restarts. The mode is detected automatically from the first DTLS packet and, for `proxy_v2_meta`, confirmed by the `WGTM` metadata frame.
+
+Webhooks, commands, and client-state export are enabled only for `proxy_v2_meta`. `proxy_v1` and `proxy_v2` run as plain TURN proxy modes without those hooks.
+
+Optional client-state export can be enabled via environment variables:
+- `VKTURN_STATE_JSON=/path/to/clients-state.json`
+- `VKTURN_STATE_INACTIVE_GRACE=90s`
+
+If `VKTURN_STATE_JSON` is not set, the server behaves like the standard build and does not persist external state.
+
+Lifecycle webhooks can also be enabled through environment variables. Each event has its own variables:
+- `VKTURN_WEBHOOK_ON_SESSION_CREATED_URL/METHOD/TEMPLATE/HEADERS`
+- `VKTURN_WEBHOOK_ON_SESSION_UPDATED_URL/METHOD/TEMPLATE/HEADERS`
+- `VKTURN_WEBHOOK_ON_SESSION_IDLE_URL/METHOD/TEMPLATE/HEADERS`
+- `VKTURN_WEBHOOK_ON_SESSION_EXPIRED_URL/METHOD/TEMPLATE/HEADERS`
+- `VKTURN_WEBHOOK_ON_SESSION_CLOSED_URL/METHOD/TEMPLATE/HEADERS`
+
+Global webhook transport settings:
+- `VKTURN_WEBHOOK_TIMEOUT=3s`
+- `VKTURN_WEBHOOK_SSL_VERIFY=true`
+
+Only `GET` and `POST` are supported. `POST` requires a template, while `GET` may omit it. `HEADERS` must be a JSON object. If an event config is incomplete or invalid, the server exits on startup with a clear log message.
+
+Local commands and scripts are available through the same event-based pattern. Each event can define one command:
+- `VKTURN_EXEC_ON_SESSION_CREATED_COMMAND`
+- `VKTURN_EXEC_ON_SESSION_UPDATED_COMMAND`
+- `VKTURN_EXEC_ON_SESSION_IDLE_COMMAND`
+- `VKTURN_EXEC_ON_SESSION_EXPIRED_COMMAND`
+- `VKTURN_EXEC_ON_SESSION_CLOSED_COMMAND`
+
+Global execution settings:
+- `VKTURN_EXEC_TIMEOUT=3s`
+- `VKTURN_EXEC_SHELL=/bin/sh`
+
+The command runs through a shell, so you can point it at a direct command or an executable script. The same variables are available in the command text and as environment variables: `${event}`, `${session_id}`, `${status}`, `${public_key}`, `${client_public_ip}`, `${relay_ips_csv}`, `${relay_ips_json}`, `${active_streams}`, `${persistent_keepalive}`, `${last_seen_unix}`, `${last_change_unix}`, `${ts_unix}`.
+
 ### Client
 
 #### Android
 
 **Recommended method:**
-Use the native Android app [wireguard-turn-android](https://github.com/kiper292/wireguard-turn-android). This is a modified WireGuard client with built-in TURN support.
+Use the native Android app [wireguard-turn-android](https://github.com/Yasich217/wireguard-turn-android). This is a modified WireGuard client with built-in TURN support, OTA updates, and extended client metadata reporting.
 
 **Alternative method (via Termux):**
 - In the WireGuard client config, change the server address to `127.0.0.1:9000` and set MTU to 1280.
