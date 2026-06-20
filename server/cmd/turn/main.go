@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/tls"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -223,7 +225,19 @@ func (s *UserSession) Cleanup() {
 func main() {
 	listen := flag.String("listen", "0.0.0.0:56000", "listen on ip:port")
 	connect := flag.String("connect", "", "connect to ip:port")
+	wrapMode := flag.Bool("wrap", false, "enable SRTP-like WRAP obfuscation for DTLS packets before TURN ChannelData")
+	wrapKeyHex := flag.String("wrap-key", "", "32-byte hex WRAP key, 64 hex chars")
+	genWrapKey := flag.Bool("gen-wrap-key", false, "print a fresh WRAP key and exit")
 	flag.Parse()
+
+	if *genWrapKey {
+		key := make([]byte, wrapKeyLen)
+		if _, err := rand.Read(key); err != nil {
+			log.Panicf("gen-wrap-key: rand.Read: %v", err)
+		}
+		fmt.Println(hex.EncodeToString(key))
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -244,6 +258,19 @@ func main() {
 	if len(*connect) == 0 {
 		log.Panicf("server address is required")
 	}
+	var wrapKey []byte
+	if *wrapMode {
+		if strings.TrimSpace(*wrapKeyHex) == "" {
+			log.Panicf("-wrap requires -wrap-key")
+		}
+		wrapKey, err = hex.DecodeString(strings.TrimSpace(*wrapKeyHex))
+		if err != nil {
+			log.Panicf("-wrap-key invalid hex: %v", err)
+		}
+		if len(wrapKey) != wrapKeyLen {
+			log.Panicf("-wrap-key must decode to %d bytes (got %d)", wrapKeyLen, len(wrapKey))
+		}
+	}
 
 	certificate, genErr := selfsign.GenerateSelfSigned()
 	if genErr != nil {
@@ -257,7 +284,17 @@ func main() {
 		ConnectionIDGenerator: dtls.RandomCIDGenerator(8),
 	}
 
-	listener, err := dtls.Listen("udp", addr, config)
+	var listener net.Listener
+	if *wrapMode {
+		log.Printf("WRAP mode enabled: listener only accepts clients with matching wrap key")
+		wrapListener, werr := listenWrapped(addr, wrapKey)
+		if werr != nil {
+			panic(werr)
+		}
+		listener, err = dtls.NewListener(wrapListener, config)
+	} else {
+		listener, err = dtls.Listen("udp", addr, config)
+	}
 	if err != nil {
 		panic(err)
 	}
@@ -309,7 +346,7 @@ func main() {
 		log.Printf("Client state export disabled (set VKTURN_STATE_JSON to enable)")
 	}
 
-	log.Printf("Listening on %s, forwarding to %s", *listen, *connect)
+	log.Printf("Listening on %s, forwarding to %s (wrap=%t)", *listen, *connect, *wrapMode)
 
 	for {
 		conn, err := listener.Accept()

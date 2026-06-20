@@ -122,6 +122,7 @@ jobs:
             echo "Using Android NDK CC=$CC"
           fi
 
+          rm -rf dist
           mkdir -p dist
 
           # Set extension for windows
